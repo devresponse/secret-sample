@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Trusted events (push to repo, or PRs from same repo):
+      - name: Set up secrets (trusted only)
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        shell: pwsh
+        env:
+          AGE_PRIVATE_KEY: ${{ secrets.AGE_PRIVATE_KEY }}
+        run: |
+          # Rehydrate the age private key and point SOPS to it
+          Set-Content -NoNewline -Encoding UTF8 .\.agekey $env:AGE_PRIVATE_KEY
+          $env:SOPS_AGE_KEY_FILE = "$PWD\.agekey"
+
+          # Decrypt the repository-committed secrets.yaml into a plaintext file
+          sops -d secrets.yaml | Set-Content -NoNewline -Encoding UTF8 secrets.plain.yaml
+
+          # OPTIONAL: Convert flat YAML (KEY: VALUE) into a .env file for common app loaders
+          $dotenv = (Get-Content secrets.plain.yaml) `
+            | Where-Object { $_ -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)\s*$' } `
+            | ForEach-Object {
+                $name = $Matches[1]
+                $val  = $Matches[2].Trim()
+                if ($val -match '^"(.*)"$') { $val = $Matches[1] }
+                if ($val -match "^'(.*)'$") { $val = $Matches[1] }
+                "$name=$val"
+              }
+          $dotenv | Set-Content -NoNewline -Encoding UTF8 .env
+
+      # Untrusted events (PRs from forks): do NOT use secrets
+      - name: Fallback for forks (no secrets)
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        shell: pwsh
+        run: |
+          if (Test-Path ".env.example") {
+            Copy-Item ".env.example" ".env" -Force
+            Write-Host "Using .env.example for fork PR."
+          } else {
+            Write-Host "No .env.example found; proceeding without secrets."
+          }
+
+      - name: Build & Test
+        run: |
+          echo "Put your build/test commands here (e.g., dotnet test, npm test, etc.)"
